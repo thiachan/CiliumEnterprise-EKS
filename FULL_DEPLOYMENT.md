@@ -377,21 +377,127 @@ $ kubectl -n boutique get svc frontend-external -o wide
 
 ### 9.2 Prove the L7 network policy (Star Wars)
 
-The policy allows allied X-wings to `POST /v1/request-landing` on the deathstar but denies
-everything else (like `PUT /v1/exhaust-port`):
+#### 9.2.1 What this demo actually is
+
+The "Star Wars" demo is Cilium's official, tiny example for showing **Layer-7 (HTTP-aware)
+network policy**. It deploys three things into the `default` namespace:
+
+| Workload | Labels | Role |
+|----------|--------|------|
+| `deathstar` (Deployment, 2 pods, behind a Service) | `org=empire, class=deathstar` | An HTTP API server. It exposes `POST /v1/request-landing` (let a ship land) and a sensitive `PUT /v1/exhaust-port` (the one that blows it up). |
+| `tiefighter` (pod) | `org=empire, class=tiefighter` | An "empire" client. |
+| `xwing` (pod) | `org=alliance, class=xwing` | A "rebel/alliance" client. |
+
+The story: we want to allow ships to **request landing** but make sure nobody can hit the
+dangerous **exhaust-port** endpoint. A normal L3/L4 firewall can't tell those apart — they
+are both HTTP on port 80. Cilium's L7 policy can, because it inspects the HTTP method + path.
+
+#### 9.2.2 Where the files live and where the policy is applied
+
+Two separate sources are used, both wired up by [`lab/deploy.sh`](lab/deploy.sh):
+
+1. **The app manifest** is pulled from the upstream Cilium repo at deploy time (not stored in
+   this repo). `deploy.sh` runs, in step 2/3:
+   ```bash
+   kubectl apply -f \
+     https://raw.githubusercontent.com/cilium/cilium/v1.15.6/examples/minikube/http-sw-app.yaml
+   ```
+   That creates the `deathstar` Service + Deployment and the `xwing` / `tiefighter` pods in
+   the **`default`** namespace.
+
+2. **The L7 policy** is stored **in this repo** at
+   [`lab/starwars-l7-policy.yaml`](lab/starwars-l7-policy.yaml) and is applied right after,
+   also by `deploy.sh`:
+   ```bash
+   kubectl apply -f "${SCRIPT_DIR}/starwars-l7-policy.yaml"
+   ```
+   It is a `CiliumNetworkPolicy` named `rule-deathstar`, applied into the **`default`**
+   namespace (a `CiliumNetworkPolicy` is namespaced; with no `namespace:` field it lands in
+   whatever namespace `kubectl` targets — here, `default`). The rule says: *only pods labelled
+   `org=alliance` may reach the deathstar, and only via `POST /v1/request-landing` on port 80.*
+   Everything else is denied.
+
+So after `./lab/deploy.sh`, both the app and the policy already exist — you do **not** need
+to apply anything manually. (If you ever want to apply just the policy by hand:
+`kubectl apply -f lab/starwars-l7-policy.yaml`.)
+
+#### 9.2.3 See that the policy is installed and where it is attached
+
+```bash
+# List Cilium network policies in the default namespace — you should see "rule-deathstar"
+$ kubectl -n default get ciliumnetworkpolicies
+NAME            AGE
+rule-deathstar  3m
+
+# 'cnp' is the short name; this works too
+$ kubectl -n default get cnp
+
+# Inspect the policy in full (selectors + the L7 HTTP rule)
+$ kubectl -n default describe cnp rule-deathstar
+$ kubectl -n default get cnp rule-deathstar -o yaml
+
+# See WHICH pods the policy is enforced on (the deathstar endpoints).
+# 'Policy (ingress) Enabled' on the deathstar endpoints confirms enforcement is active.
+$ kubectl -n kube-system exec ds/cilium -c cilium-agent -- cilium-dbg endpoint list \
+    | grep -E 'deathstar|xwing|tiefighter'
+```
+
+#### 9.2.4 Verify the policy actually works (allowed vs denied)
+
+First wait for the deathstar to be ready, then grab the X-wing pod name into a variable:
 
 ```bash
 $ kubectl -n default wait --for=condition=ready pod -l class=deathstar --timeout=120s
 $ XWING=$(kubectl get pod -l class=xwing -o jsonpath='{.items[0].metadata.name}')
+$ echo "$XWING"          # sanity check: prints the xwing pod name
+```
 
+Allowed call — the policy permits `POST /v1/request-landing`:
+
+```bash
 $ kubectl exec "$XWING" -- curl -s -XPOST deathstar.default.svc.cluster.local/v1/request-landing
 Ship landed
+```
 
+Denied call — same pod, same port, but a different HTTP method/path the policy does not allow:
+
+```bash
 $ kubectl exec "$XWING" -- curl -s -XPUT deathstar.default.svc.cluster.local/v1/exhaust-port
 Access denied
 ```
 
-`Ship landed` = allowed by L7 policy; `Access denied` = blocked by Cilium at L7.
+- `Ship landed` → the request was **allowed** by the L7 rule.
+- `Access denied` → Cilium **blocked it at Layer 7** (the connection still reached port 80,
+  but the embedded Envoy proxy rejected the method/path). This is the whole point: an L3/L4
+  firewall could not have distinguished these two HTTP calls.
+
+#### 9.2.5 Watch the enforcement happen live in Hubble
+
+In a second terminal, stream HTTP flows for the `default` namespace, then re-run the two
+curls from 9.2.4:
+
+```bash
+$ cilium hubble port-forward &
+$ hubble observe --namespace default --protocol http --follow
+```
+
+You will see two L7 entries — the `POST /v1/request-landing` as `FORWARDED` and the
+`PUT /v1/exhaust-port` as `DROPPED` with an `http` verdict. That dropped line is the policy
+doing its job.
+
+#### 9.2.6 (Optional) Prove it's the policy by removing it
+
+```bash
+# Delete the policy → the previously denied call now succeeds
+$ kubectl -n default delete cnp rule-deathstar
+$ kubectl exec "$XWING" -- curl -s -XPUT deathstar.default.svc.cluster.local/v1/exhaust-port
+Panic: deathstar exploded          # no longer blocked!
+
+# Re-apply to restore enforcement
+$ kubectl apply -f lab/starwars-l7-policy.yaml
+$ kubectl exec "$XWING" -- curl -s -XPUT deathstar.default.svc.cluster.local/v1/exhaust-port
+Access denied
+```
 
 ### 9.3 Observe flows with Hubble
 
