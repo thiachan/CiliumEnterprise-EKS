@@ -85,6 +85,11 @@ aws eks update-kubeconfig --region ap-southeast-2 --name isovalent-syd
 > Read **[FULL_DEPLOYMENT.md](FULL_DEPLOYMENT.md)** — a complete, manual, copy-paste
 > walkthrough from an empty laptop to a working, observable, encrypted cluster,
 > including every error we hit in the real world and how to fix it.
+>
+> **Want to actually use the platform?**
+> See **[ISOVALENT_FEATURES.md](ISOVALENT_FEATURES.md)** — hands-on labs from essential to
+> advanced: Hubble observability, L3/L4/L7 & DNS policy, WireGuard, Tetragon enforcement,
+> egress gateway, ClusterMesh, Gateway API, mutual auth, and more.
 
 ## Cost & cleanup
 
