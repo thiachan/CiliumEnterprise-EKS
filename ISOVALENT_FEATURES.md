@@ -4,6 +4,12 @@ A hands-on lab guide for everything you can do with the **open-source Isovalent 
 (Cilium + Hubble + Tetragon) on the cluster built by this repo (`isovalent-syd`,
 `ap-southeast-2`). Work top to bottom, or jump to a feature.
 
+> **Course map:** [Part 0 · Orientation](README.md) → [Part 1 · Build & Verify](FULL_DEPLOYMENT.md) → **Part 2 · Operate & Explore (this page)**
+>
+> You are in **Part 2**. This assumes you already completed **Part 1** and have a healthy
+> cluster (`cilium status` all `OK`). If not, build it first with
+> [FULL_DEPLOYMENT.md](FULL_DEPLOYMENT.md).
+
 > Setup assumptions
 > - `kubectl`, `cilium`, and `hubble` CLIs installed (`brew install cilium-cli hubble`).
 > - The lab apps are deployed (`./lab/deploy.sh`): `boutique` namespace (Online Boutique)
@@ -671,6 +677,13 @@ $ kubectl apply -f lab/tetragon-tracingpolicy.yaml
 ---
 
 ### Where to go next
+
+You've completed the course — Part 0 (orientation) → Part 1 (build & verify) → Part 2 (this
+guide). When you're done experimenting, **tear the lab down to stop billing**:
+[FULL_DEPLOYMENT.md › Teardown](FULL_DEPLOYMENT.md#11-teardown). It rebuilds in ~20 minutes
+whenever you want it back.
+
+Keep learning:
 - Cilium docs: https://docs.cilium.io
 - Tetragon docs: https://tetragon.io
 - Isovalent labs (free, browser-based): https://isovalent.com/labs

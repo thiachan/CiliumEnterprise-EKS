@@ -16,6 +16,11 @@ because you will probably hit at least one of them.
 > - Replace anything in `<ANGLE_BRACKETS>` with your own value.
 > - **Never paste real AWS keys into chats, tickets, or commits.** Use `aws configure`.
 
+> **Course map:** [Part 0 · Orientation](README.md) → **Part 1 · Build & Verify (this page)** → [Part 2 · Operate & Explore](ISOVALENT_FEATURES.md)
+>
+> You are in **Part 1**. Finish this page end-to-end — by the last section you'll have a
+> running, verified cluster — then move on to Part 2 for the hands-on feature labs.
+
 ---
 
 ## How to use this guide
@@ -26,13 +31,13 @@ every later step assumes the vocabulary and mental model it builds. Each major s
 with a short *"What you'll learn"* box and closes with a *"Check yourself"* box so you can
 confirm you actually understood it before moving on.
 
-Three documents make up the full course:
+Three documents make up the full course (always read them in this order):
 
-| Document | Purpose | Read it when |
-|----------|---------|-------------|
-| **This file** (`FULL_DEPLOYMENT.md`) | Build the cluster from a blank laptop to a running, verified stack. | First. Start to finish. |
-| [`ISOVALENT_FEATURES.md`](ISOVALENT_FEATURES.md) | Hands-on labs for every Cilium / Hubble / Tetragon feature. | After the cluster is up and verified. |
-| [`README.md`](README.md) | Quick reference and repo map. | Any time you need a fast reminder. |
+| Part | Document | Purpose | Read it when |
+|------|----------|---------|-------------|
+| 0 | [`README.md`](README.md) | Big-picture orientation, topology and repo map. | First, for context. |
+| **1** | **`FULL_DEPLOYMENT.md`** (this file) | Build the cluster from a blank laptop to a running, verified stack. | **Now** — start to finish. |
+| 2 | [`ISOVALENT_FEATURES.md`](ISOVALENT_FEATURES.md) | Hands-on labs for every Cilium / Hubble / Tetragon feature. | After this cluster is up and verified. |
 
 ## Table of contents
 
@@ -73,29 +78,40 @@ control what they do.
 
 ### 0.2 The layers, from the metal up
 
+This is the **canonical topology** for the whole course — the same diagram is in
+[README › Architecture](README.md#architecture). Both worker nodes are identical: each runs a
+**Cilium agent** and a **Tetragon agent** (DaemonSets — one pod per node). Hubble, ClusterMesh
+and CoreDNS run once per cluster.
+
 ```mermaid
 flowchart TB
-    subgraph AWS["AWS account (region: ap-southeast-2 / Sydney)"]
-        VPC["VPC 10.42.0.0/16<br/>subnets · route tables · NAT gateway"]
-        subgraph EKS["EKS cluster (isovalent-syd)"]
-            CP["Control plane<br/>(AWS-managed: API server, etcd, scheduler)"]
-            subgraph NODES["Managed node group — 2 × m5.large EC2"]
-                subgraph N1["Worker node 1"]
-                    CIL1["Cilium agent (eBPF datapath)"]
-                    TET1["Tetragon agent"]
-                    P1["app pods"]
+    YOU["Your Mac<br/>terraform · kubectl · cilium · hubble"]
+    subgraph AWS["AWS · ap-southeast-2 (Sydney)"]
+        subgraph VPC["VPC 10.42.0.0/16 · 3 AZs · NAT gateway"]
+            subgraph EKS["EKS cluster: isovalent-syd (k8s 1.30)"]
+                CP["Control plane (AWS-managed)<br/>API server · etcd · scheduler"]
+                subgraph NG["Managed node group · 2 × m5.large"]
+                    subgraph N1["Worker node 1"]
+                        A1["Cilium agent (eBPF)"]
+                        T1["Tetragon agent"]
+                        P1["app pods"]
+                    end
+                    subgraph N2["Worker node 2"]
+                        A2["Cilium agent (eBPF)"]
+                        T2["Tetragon agent"]
+                        P2["app pods"]
+                    end
                 end
-                subgraph N2["Worker node 2"]
-                    CIL2["Cilium agent (eBPF datapath)"]
-                    TET2["Tetragon agent"]
-                    P2["app pods"]
-                end
+                ADDON["Cluster services:<br/>Hubble Relay + UI · ClusterMesh API · CoreDNS"]
             end
         end
     end
-    YOU["Your Mac<br/>terraform · kubectl · cilium · hubble"] -->|"aws / kubectl APIs"| CP
+    YOU -->|aws / kubectl| CP
     CP --- N1
     CP --- N2
+    N1 <-->|WireGuard encrypted| N2
+    A1 -.-> ADDON
+    A2 -.-> ADDON
 ```
 
 Read it top-down: **AWS** holds a **VPC** (a private network); inside it the **EKS control
