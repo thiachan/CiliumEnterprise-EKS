@@ -9,10 +9,29 @@ A hands-on lab guide for everything you can do with the **open-source Isovalent 
 > - The lab apps are deployed (`./lab/deploy.sh`): `boutique` namespace (Online Boutique)
 >   and `default` namespace (Star Wars demo).
 > - Run `cilium status` first — everything should be `OK`.
+> - New to the stack? Build and verify the cluster with
+>   [`FULL_DEPLOYMENT.md`](FULL_DEPLOYMENT.md) first — especially its
+>   [Section 0 concepts primer](FULL_DEPLOYMENT.md#0-concepts-you-need-first).
 
 ---
 
+## How to work through this guide
+
+The labs are graded **Essential → Intermediate → Advanced**. Each builds on vocabulary from
+the one before, so on a first pass go top to bottom. Most labs follow the same rhythm:
+
+1. **Concept** — what the feature is and why it exists.
+2. **Apply** — a small YAML or command you run.
+3. **Observe** — watch the effect live in Hubble or Tetragon.
+4. **Prove** — an allowed-vs-denied test that shows it actually working.
+
+Before the labs, read [Section 0](#0-core-concepts-the-mental-model) once — it explains the
+*identity* model and the eBPF datapath that make every policy below behave the way it does.
+
 ## Table of contents
+
+**Foundations**
+0. [Core concepts — the mental model](#0-core-concepts-the-mental-model)
 
 **Essential**
 1. [Observe traffic with Hubble](#1-observe-traffic-with-hubble)
@@ -37,6 +56,101 @@ A hands-on lab guide for everything you can do with the **open-source Isovalent 
 16. [Gateway API / Ingress with Cilium](#16-gateway-api--ingress-with-cilium)
 17. [Mutual authentication (mTLS-style identity)](#17-mutual-authentication-mtls-style-identity)
 18. [Export flows to OpenTelemetry / SIEM](#18-export-flows-to-opentelemetry--siem)
+
+**Reference**
+- [Glossary](#glossary)
+
+---
+
+# Foundations
+
+## 0. Core concepts — the mental model
+
+> **What you'll learn:** the three ideas that make every later lab "click" — how Cilium
+> identifies workloads, where in the stack it enforces rules, and the difference between
+> network policy (Cilium) and runtime policy (Tetragon).
+
+### 0.1 Identities, not IP addresses
+
+The single most important idea in Cilium: **policy is written against labels, not IPs.**
+
+In a traditional firewall you allow `10.0.3.5 → 10.0.4.2:443`. But pods are ephemeral —
+their IPs change every restart and reschedule, so IP rules rot instantly. Cilium instead
+gives every set of identically-labelled pods a stable **security identity** derived from its
+Kubernetes labels (e.g. `app=frontend`). When you write *"frontend may talk to
+cartservice"*, Cilium enforces it no matter which node the pods land on or what IPs they get.
+
+```mermaid
+flowchart LR
+    subgraph id1["Identity: app=frontend"]
+        f1["pod 10.42.1.7"]
+        f2["pod 10.42.2.9"]
+    end
+    subgraph id2["Identity: app=cartservice"]
+        c1["pod 10.42.1.3"]
+    end
+    id1 -->|"policy: allow frontend → cartservice:7070"| id2
+```
+
+This is why, throughout these labs, policies select with `matchLabels` and you never type a
+pod IP. It's also why Hubble shows you *names* (`frontend → cartservice`) instead of raw IPs.
+
+### 0.2 Where enforcement happens: the eBPF datapath and L3–L7
+
+Cilium attaches **eBPF** programs to each pod's virtual network interface inside the Linux
+kernel. Every packet passes through them, so Cilium can allow/deny without a userspace proxy
+for L3/L4. For L7 (HTTP, DNS, gRPC, Kafka) it transparently redirects the connection through
+an **embedded Envoy** proxy — still no sidecars in your pods.
+
+The "L" numbers refer to the OSI layer a rule inspects:
+
+| Layer | Rule matches on | Example in these labs |
+|-------|-----------------|------------------------|
+| **L3** | Source/destination *identity* (labels) or CIDR | "only `frontend` may reach `cartservice`" |
+| **L4** | + TCP/UDP port and protocol | "...on TCP **7070** only" (Lab 3) |
+| **L7** | + application content (HTTP method/path, DNS name) | "...only `POST /v1/request-landing`" (Lab 4); "only `api.github.com`" (Lab 5) |
+
+A plain firewall stops at L4 — it sees "TCP port 80" and can't tell a safe request from a
+dangerous one on the *same* port. Cilium's L7 awareness is exactly what the Star Wars demo
+(Lab 4) demonstrates.
+
+### 0.3 Default-allow vs default-deny
+
+By default, Kubernetes allows **all** pod-to-pod traffic. The moment you apply a
+`CiliumNetworkPolicy` that *selects* a pod, that pod flips to **default-deny for the
+direction(s) you specified** — only explicitly-allowed traffic gets through. This catches
+everyone out once: applying an "allow frontend" ingress rule silently blocks every *other*
+source. Labs 3, 4 and 8 lean on this behaviour deliberately; keep a Hubble `--verdict
+DROPPED` stream open while you experiment.
+
+### 0.4 Two kinds of policy: network vs runtime
+
+This stack secures two different planes. Knowing which tool owns which keeps you from
+reaching for the wrong one:
+
+| | **Cilium** (network) | **Tetragon** (runtime) |
+|---|----------------------|------------------------|
+| Watches | Packets / connections between workloads | Processes, file access, syscalls *inside* a container |
+| Policy object | `CiliumNetworkPolicy`, `CiliumClusterwideNetworkPolicy` | `TracingPolicy` |
+| Question it answers | "Who may talk to whom, and how?" | "What is this process actually *doing* on the host?" |
+| Can it block? | Yes — drop packets (L3–L7) | Yes — `SIGKILL` the process in-kernel (Lab 13) |
+| You'll meet it in | Labs 1–11, 14–18 | Labs 12–13 |
+
+Mnemonic: **Cilium guards the wire; Tetragon guards the box.** Together they give you
+network *and* host telemetry from one eBPF foundation.
+
+### 0.5 The objects you'll create
+
+| Object (kind) | Scope | What it does |
+|---------------|-------|--------------|
+| `CiliumNetworkPolicy` (CNP) | One namespace | L3–L7 allow rules for selected pods |
+| `CiliumClusterwideNetworkPolicy` (CCNP) | Whole cluster | Same, but applies across all namespaces (and to host endpoints) |
+| `TracingPolicy` | Whole cluster | Tells Tetragon which kernel events to observe or enforce |
+
+> **Check yourself:** (1) Why does Cilium use labels instead of IPs? (2) What does applying
+> *any* ingress policy do to a pod's *other* inbound traffic? (3) Which tool would you use to
+> block a process reading `/etc/shadow` — Cilium or Tetragon? If those are clear, you're
+> ready for the labs.
 
 ---
 
@@ -518,6 +632,41 @@ Re-apply the shipped lab policies if needed:
 $ kubectl apply -f lab/starwars-l7-policy.yaml
 $ kubectl apply -f lab/tetragon-tracingpolicy.yaml
 ```
+
+---
+
+## Glossary
+
+| Term | Definition |
+|------|------------|
+| **Identity** | A stable security ID Cilium derives from a workload's labels; policy is written against these, not IPs. |
+| **Endpoint** | Cilium's term for a networked workload (usually a pod) it manages. |
+| **CNP** | `CiliumNetworkPolicy` — namespaced L3–L7 allow rules. |
+| **CCNP** | `CiliumClusterwideNetworkPolicy` — same, applied across all namespaces and host endpoints. |
+| **L3 / L4 / L7** | OSI layers a rule inspects: identity/CIDR (L3), port/protocol (L4), application content like HTTP/DNS (L7). |
+| **eBPF** | Sandboxed programs running in the Linux kernel; Cilium's and Tetragon's datapath. |
+| **Envoy** | The proxy Cilium embeds to enforce L7 (HTTP/DNS/gRPC) rules — no app sidecars. |
+| **Hubble** | Cilium's observability layer: live service map + searchable flow log. |
+| **Hubble Relay** | Aggregates per-node Hubble data into one cluster-wide stream. |
+| **Flow** | A single observed connection/packet event in Hubble, with verdict `FORWARDED` or `DROPPED`. |
+| **Verdict** | Hubble's allow/deny result for a flow (`FORWARDED`, `DROPPED`). |
+| **Default-deny** | The state a pod enters once any policy selects it: only explicitly-allowed traffic passes. |
+| **FQDN policy** | A policy that allows egress to a DNS name (e.g. `api.github.com`) rather than an IP. |
+| **kube-proxy replacement** | Cilium load-balancing Services in eBPF instead of the deleted `kube-proxy`/`iptables`. |
+| **Maglev / DSR** | Optional LB tunings: consistent-hash backend selection; Direct Server Return preserves client source IP. |
+| **WireGuard** | VPN protocol Cilium uses for transparent node-to-node encryption (`cilium_wg0`). |
+| **Host firewall** | Cilium policy applied to the node's own host network namespace, not just pods. |
+| **Bandwidth manager** | eBPF egress rate-limiting driven by a pod annotation. |
+| **Tetragon** | eBPF runtime-security tool that observes (and can block) process/file/network events. |
+| **TracingPolicy** | Tetragon CRD defining which kernel events (kprobes/syscalls) to watch or enforce. |
+| **kprobe** | A kernel probe point Tetragon hooks to observe a function call (e.g. `security_file_permission`). |
+| **SIGKILL action** | A Tetragon enforcement action that terminates a matching process in-kernel. |
+| **Egress gateway** | Routes selected pods' outbound traffic through a fixed node so external systems see a predictable source IP. |
+| **ClusterMesh** | Connects multiple Cilium clusters so Services can span and fail over across them. |
+| **Global service** | A Service annotated `service.cilium.io/global="true"` so it's reachable across a ClusterMesh. |
+| **Gateway API** | The modern Kubernetes ingress standard; Cilium can act as the controller (`gatewayClassName: cilium`). |
+| **Mutual authentication** | Cilium-enforced workload identity (SPIFFE/SPIRE) added to a policy via `authentication.mode: required`. |
+| **OpenMetrics** | The Prometheus-compatible metrics format Hubble exports for dashboards. |
 
 ---
 

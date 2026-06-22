@@ -18,8 +18,25 @@ because you will probably hit at least one of them.
 
 ---
 
+## How to use this guide
+
+This document is written to be **read in order the first time**, then used as a reference
+afterwards. If you are new to Kubernetes or to Cilium, **do not skip [Section 0](#0-concepts-you-need-first)** —
+every later step assumes the vocabulary and mental model it builds. Each major section opens
+with a short *"What you'll learn"* box and closes with a *"Check yourself"* box so you can
+confirm you actually understood it before moving on.
+
+Three documents make up the full course:
+
+| Document | Purpose | Read it when |
+|----------|---------|-------------|
+| **This file** (`FULL_DEPLOYMENT.md`) | Build the cluster from a blank laptop to a running, verified stack. | First. Start to finish. |
+| [`ISOVALENT_FEATURES.md`](ISOVALENT_FEATURES.md) | Hands-on labs for every Cilium / Hubble / Tetragon feature. | After the cluster is up and verified. |
+| [`README.md`](README.md) | Quick reference and repo map. | Any time you need a fast reminder. |
+
 ## Table of contents
 
+0. [Concepts you need first](#0-concepts-you-need-first)
 1. [Prerequisites and tool installation](#1-prerequisites-and-tool-installation)
 2. [AWS account and IAM preparation](#2-aws-account-and-iam-preparation)
 3. [Configure AWS credentials locally](#3-configure-aws-credentials-locally)
@@ -32,10 +49,157 @@ because you will probably hit at least one of them.
 10. [Troubleshooting — real-world errors and fixes](#10-troubleshooting--real-world-errors-and-fixes)
 11. [Teardown](#11-teardown)
 12. [Security checklist](#12-security-checklist)
+13. [Cost — what this lab actually bills](#13-cost--what-this-lab-actually-bills)
+14. [Glossary](#14-glossary)
+
+---
+
+## 0. Concepts you need first
+
+> **What you'll learn:** the handful of ideas that make every later command make sense —
+> what EKS and Kubernetes actually are, what a CNI does, why eBPF matters, and how Cilium,
+> Hubble and Tetragon fit together. Spend ten minutes here and the rest of the guide reads
+> like plain English.
+
+### 0.1 The 30-second summary
+
+You are going to use **Terraform** (infrastructure-as-code) to ask **AWS** to build a
+**Kubernetes** cluster using the **EKS** managed service. Normally EKS wires up pod
+networking with the **AWS VPC CNI**. We rip that out and put **Cilium** in its place, because
+Cilium is built on **eBPF** and gives us networking, security policy, encryption and deep
+observability from one component. We then run two small demo apps on top and use
+**Hubble** (network visibility) and **Tetragon** (runtime/process visibility) to see and
+control what they do.
+
+### 0.2 The layers, from the metal up
+
+```mermaid
+flowchart TB
+    subgraph AWS["AWS account (region: ap-southeast-2 / Sydney)"]
+        VPC["VPC 10.42.0.0/16<br/>subnets · route tables · NAT gateway"]
+        subgraph EKS["EKS cluster (isovalent-syd)"]
+            CP["Control plane<br/>(AWS-managed: API server, etcd, scheduler)"]
+            subgraph NODES["Managed node group — 2 × m5.large EC2"]
+                subgraph N1["Worker node 1"]
+                    CIL1["Cilium agent (eBPF datapath)"]
+                    TET1["Tetragon agent"]
+                    P1["app pods"]
+                end
+                subgraph N2["Worker node 2"]
+                    CIL2["Cilium agent (eBPF datapath)"]
+                    TET2["Tetragon agent"]
+                    P2["app pods"]
+                end
+            end
+        end
+    end
+    YOU["Your Mac<br/>terraform · kubectl · cilium · hubble"] -->|"aws / kubectl APIs"| CP
+    CP --- N1
+    CP --- N2
+```
+
+Read it top-down: **AWS** holds a **VPC** (a private network); inside it the **EKS control
+plane** is the brain Kubernetes runs on; **worker nodes** are ordinary EC2 virtual machines
+where your containers actually run; and on every node sits a **Cilium agent** and a
+**Tetragon agent**.
+
+### 0.3 The vocabulary, defined once
+
+| Term | Plain-English meaning | Why you care here |
+|------|----------------------|-------------------|
+| **AWS** | Amazon's public cloud — you rent servers, networks and services by the hour. | Everything runs here; you pay while it's up. |
+| **Region** | A geographic cluster of AWS data centres (`ap-southeast-2` = Sydney). | Lower latency for AU users; keeps data in-country. |
+| **VPC** | Virtual Private Cloud — your own isolated network inside AWS. | Your nodes and pods get IPs from it (`10.42.0.0/16`). |
+| **EC2 instance** | A virtual machine you rent. `m5.large` = 2 vCPU, 8 GB RAM. | Your Kubernetes *worker nodes* are EC2 instances. |
+| **Kubernetes (k8s)** | An orchestrator that schedules and heals containers across many machines. | The platform everything else plugs into. |
+| **EKS** | AWS's *managed* Kubernetes — AWS runs the control plane for you. | You don't babysit etcd/API server; you just use them. |
+| **Control plane** | The Kubernetes "brain": API server, scheduler, etcd database. | You talk to it with `kubectl`; AWS keeps it alive. |
+| **Node** | A worker machine that runs your pods. | This lab has 2. The Cilium/Tetragon agents run one-per-node. |
+| **Pod** | The smallest deployable unit — one or more containers sharing an IP. | Your apps run as pods. |
+| **Container** | A packaged process with its own filesystem, isolated from the host. | What's actually inside a pod. |
+| **Namespace** | A logical folder that groups pods/services (`kube-system`, `boutique`, `default`). | Why `kubectl get pods` looks "empty" — it only shows `default`. |
+| **CNI** | Container Network Interface — the plugin that gives pods their IPs and connectivity. | We swap the default (AWS VPC CNI) for **Cilium**. |
+| **eBPF** | Tech that runs sandboxed programs *inside the Linux kernel* safely. | How Cilium does networking/security fast, without sidecars. |
+| **Helm** | A package manager for Kubernetes ("apt for k8s"). | How Cilium and Tetragon get installed. |
+| **Terraform** | Declarative infrastructure-as-code; you describe the end state, it builds it. | Builds the whole VPC + EKS + add-ons reproducibly. |
+
+### 0.4 What a CNI is, and why we replace it
+
+When a pod starts, *something* has to give it an IP address, plug it into the network, and
+decide which other pods it may talk to. That "something" is the **CNI plugin**.
+
+- **Default on EKS:** the **AWS VPC CNI** (`aws-node`) hands each pod a real VPC IP, and a
+  separate component, **`kube-proxy`**, programs `iptables` rules to route Service traffic.
+- **What we do instead:** install **Cilium** and *delete* both `aws-node` and `kube-proxy`.
+  Cilium now (a) hands out pod IPs from AWS ENIs, (b) replaces `kube-proxy` with eBPF service
+  load-balancing, and (c) enforces network policy and encryption — all in one agent.
+
+That single swap is the heart of this whole repo. It's why [Section 5](#5-understand-what-terraform-will-build)
+makes a point of *not* installing the `vpc-cni` add-on, and why the bootstrap deletes
+`aws-node`/`kube-proxy`.
+
+### 0.5 The three Isovalent components
+
+| Component | Layer | One-line job | You'll see it in |
+|-----------|-------|--------------|------------------|
+| **Cilium** | Networking + security (eBPF datapath) | Pod IPs, Service load-balancing, L3–L7 network policy, WireGuard encryption. | `cilium status`, every policy lab |
+| **Hubble** | Network *observability* (reads Cilium's data) | Live map + searchable log of every flow, including HTTP method/path/verdict. | `hubble observe`, Hubble UI |
+| **Tetragon** | Runtime *security* (separate eBPF) | Watches and can *block* process exec, file access and network syscalls in-kernel. | `tetra getevents` |
+
+A useful way to remember it: **Cilium moves and guards the packets, Hubble lets you watch
+the packets, Tetragon watches the processes that send them.**
+
+### 0.6 Two extra Cilium features this build turns on
+
+- **kube-proxy replacement** — instead of slow `iptables` chains that grow with every
+  Service, Cilium load-balances Services with eBPF hash tables. Faster, and one fewer
+  component to run.
+- **WireGuard encryption** — Cilium transparently encrypts *node-to-node* pod traffic over a
+  `cilium_wg0` interface. No app changes; you just turn it on in Helm values.
+- **ClusterMesh (ready, not paired)** — the plumbing to join a second Cilium cluster so
+  Services can fail over across clusters. It's enabled here so you can experiment later.
+
+### 0.7 The end-to-end flow you're about to perform
+
+```mermaid
+flowchart LR
+    A["Install CLIs<br/>(brew)"] --> B["Configure AWS<br/>creds + IAM"]
+    B --> C["terraform apply<br/>(build VPC + EKS)"]
+    C --> D["Bootstrap:<br/>delete aws-node /<br/>kube-proxy"]
+    D --> E["Helm installs<br/>Cilium + Tetragon"]
+    E --> F["kubectl verifies<br/>nodes Ready"]
+    F --> G["cilium status<br/>all OK"]
+    G --> H["deploy lab apps"]
+    H --> I["explore with<br/>Hubble + Tetragon"]
+```
+
+Steps A–B are [Sections 1–3](#1-prerequisites-and-tool-installation). Steps C–E are one
+`terraform apply` ([Section 6](#6-initialize-plan-apply)). Steps F–G are verification
+([Sections 7–8](#7-connect-kubectl-and-verify-the-cluster)). Steps H–I are the labs
+([Section 9](#9-deploy-and-exercise-the-lab-apps) and the whole of
+[`ISOVALENT_FEATURES.md`](ISOVALENT_FEATURES.md)).
+
+> **Check yourself:** Can you answer these in one sentence each? (1) What does a CNI do?
+> (2) Why do we delete `aws-node` and `kube-proxy`? (3) What's the difference between Hubble
+> and Tetragon? If any is fuzzy, re-read 0.4–0.5 — they underpin everything that follows.
 
 ---
 
 ## 1. Prerequisites and tool installation
+
+> **What you'll learn:** which command-line tools you need and what each one is *for*, so
+> the rest of the guide isn't a list of unfamiliar binaries.
+
+**The toolbox, and why each tool exists:**
+
+| Tool | Role in this lab |
+|------|------------------|
+| `terraform` | Builds the AWS infrastructure (VPC, EKS, node group) from the `.tf` files. |
+| `awscli` (`aws`) | Authenticates you to AWS and mints EKS login tokens for `kubectl`. |
+| `kubectl` | The primary way you talk to the Kubernetes cluster (list pods, apply YAML, exec). |
+| `helm` | Installs Cilium and Tetragon (they ship as Helm charts). |
+| `cilium-cli` (`cilium`) | Convenience wrapper: `cilium status`, connectivity tests, Hubble/ClusterMesh helpers. |
+| `hubble` | Streams and filters live network flows from Hubble Relay. |
 
 You need a Mac (these notes assume **Apple Silicon / arm64**, e.g. M1/M2/M3) with
 [Homebrew](https://brew.sh) installed. Verify Homebrew first:
@@ -78,9 +242,25 @@ $ which -a kubectl
 $ sudo rm -f /usr/local/bin/kubectl
 ```
 
+> **Check yourself:** `file "$(brew --prefix)/bin/kubectl"` says `arm64` (not `x86-64`/`ELF`),
+> and `terraform version` / `aws --version` / `cilium version` all return cleanly. If so,
+> your toolbox is sound and architecture mismatches won't bite you later.
+
 ---
 
 ## 2. AWS account and IAM preparation
+
+> **What you'll learn:** what *identity* Terraform uses to build things, why EKS needs to
+> create IAM roles on your behalf, and the two quotas/permissions that most often block a
+> first-time build.
+
+**Why IAM matters here (the concept):** every AWS API call is checked against an **IAM**
+(Identity and Access Management) policy. Terraform acts *as you*, so *your* permissions cap
+what it can build. EKS itself also needs to **create new IAM roles** — one for the cluster
+and one for the worker nodes — so it can grant the control plane and nodes their own least
+privilege. If your user can't create roles, the build stops halfway (see
+[10.2](#102-accessdenied-on-iam-and-cloudwatch-logs)). This is the single most common
+first-run failure, which is why it gets its own section.
 
 You need an AWS account and an IAM principal (user or role) with enough permissions to
 create networking, EKS, **IAM roles**, and CloudWatch log groups. EKS *cannot* be created
@@ -194,6 +374,11 @@ Before applying, know the moving parts (all under `terraform/`):
 | `tetragon.tf` | Helm release installing Tetragon |
 | `cilium/values.yaml.tftpl` | Cilium config: ENI mode, kube-proxy replacement, WireGuard, Hubble + UI, ClusterMesh |
 
+> **What you'll learn:** the exact resources Terraform creates, and *why* the config makes
+> the unusual choices it does (no VPC CNI, kube-proxy deleted, nodes briefly `NotReady`).
+> Understanding these now means the apply output in [Section 6](#6-initialize-plan-apply)
+> reads as expected behaviour rather than alarming surprises.
+
 ### Key design choices
 
 - **Cilium replaces the AWS VPC CNI.** Because `vpc-cni` is never installed and the
@@ -224,9 +409,18 @@ cilium_version    = "1.15.6"
 tetragon_version  = "1.1.2"
 ```
 
+> **Check yourself:** before applying, you should be able to explain, out loud: which file
+> creates the VPC, which file removes `aws-node`/`kube-proxy`, and where Cilium's WireGuard
+> and kube-proxy-replacement settings are configured. (Answers: `vpc.tf`, `cilium.tf`,
+> `cilium/values.yaml.tftpl`.)
+
 ---
 
 ## 6. Initialize, plan, apply
+
+> **What you'll learn:** the three-verb Terraform workflow — `init` (download providers),
+> `plan` (preview, change nothing), `apply` (build it) — and what a healthy ~20-minute build
+> looks like as it streams past.
 
 ```bash
 $ cd terraform
@@ -275,6 +469,17 @@ update_kubeconfig_command = "aws eks update-kubeconfig --region ap-southeast-2 -
 
 ## 7. Connect kubectl and verify the cluster
 
+> **What you'll learn:** how `kubectl` finds and authenticates to your new cluster, and the
+> three checks that prove the CNI swap worked: nodes `Ready`, no `aws-node`/`kube-proxy`,
+> and the `cilium`/`tetragon` DaemonSets present.
+
+**How `kubectl` knows where to go (the concept):** `aws eks update-kubeconfig` writes a
+*context* into `~/.kube/config` pointing at your cluster's API endpoint. That context doesn't
+store a password — instead it tells `kubectl` to run `aws eks get-token` each time, which
+uses your `~/.aws` credentials to mint a short-lived token. That's why credentials from
+[Section 3](#3-configure-aws-credentials-locally) are enough and you never paste a kubeconfig
+secret.
+
 Point `kubectl` at the new cluster (uses your `~/.aws` credentials automatically):
 
 ```bash
@@ -308,9 +513,17 @@ $ kubectl -n kube-system get pods -l k8s-app=cilium
 $ kubectl -n kube-system get pods -l app.kubernetes.io/name=tetragon
 ```
 
+> **Check yourself:** `kubectl get nodes` shows both nodes `Ready`; `kubectl -n kube-system
+> get ds` lists `cilium` and `tetragon` but **no** `aws-node` or `kube-proxy`. If both are
+> true, the CNI replacement succeeded — the single most important outcome of this build.
+
 ---
 
 ## 8. Verify the Isovalent stack
+
+> **What you'll learn:** how to read `cilium status`, and how to confirm the three headline
+> features (kube-proxy replacement, WireGuard encryption, healthy data path) are genuinely
+> active rather than just configured.
 
 Use the Cilium CLI to confirm everything is healthy:
 
@@ -732,3 +945,91 @@ and run it again — Kubernetes-created ELBs sometimes lag behind Terraform.
 - [ ] For shared/long-lived use, switch Terraform to a **remote backend** (S3 + DynamoDB
       lock) and use **least-privilege IAM** rather than `AdministratorAccess`.
 - [ ] Tear the cluster down when you're finished (section 11) — it bills by the hour.
+
+---
+
+## 13. Cost — what this lab actually bills
+
+> **What you'll learn:** roughly what you pay while the lab is up, so there are no billing
+> surprises. Figures are indicative on-demand `ap-southeast-2` pricing and round numbers —
+> always confirm against the live [AWS pricing pages](https://aws.amazon.com/pricing/).
+
+| Resource | Why it exists | Rough cost while running |
+|----------|---------------|--------------------------|
+| **EKS control plane** | The managed Kubernetes brain | ~US$0.10 / hour (flat, per cluster) |
+| **2 × `m5.large` EC2 nodes** | Your worker machines | ~US$0.12 / hour **each** (~US$0.24 total) |
+| **NAT gateway** | Lets private-subnet nodes reach the internet (pull images) | ~US$0.045 / hour + data processing |
+| **2 × ELB** (boutique frontend + ClusterMesh API) | Expose Services externally | ~US$0.025 / hour each |
+| **EBS volumes, EIP, data transfer** | Node disks, NAT egress IP, traffic | Small but non-zero |
+
+**Ballpark:** on the order of **US$0.50–0.60 per hour**, so a few dollars for an afternoon of
+learning. The two biggest "still billing after you walked away" traps are the **NAT gateway**
+and the **ELBs** — both are removed by `terraform destroy` ([Section 11](#11-teardown)).
+
+> **Habit to build:** treat `terraform destroy` as the last command of every lab session.
+> The cluster rebuilds from scratch in ~20 minutes whenever you want it back, so there's no
+> reason to leave it running overnight.
+
+---
+
+## 14. Glossary
+
+Quick definitions for every term used in this guide. Keep it open in a second tab the first
+time through.
+
+| Term | Definition |
+|------|------------|
+| **AWS** | Amazon Web Services — the public cloud hosting everything in this lab. |
+| **Region** | A geographic group of AWS data centres. Here, `ap-southeast-2` (Sydney). |
+| **AZ (Availability Zone)** | An isolated data centre within a region; this VPC spans 3. |
+| **VPC** | Virtual Private Cloud — your isolated AWS network (`10.42.0.0/16`). |
+| **Subnet** | A slice of the VPC's IP range in one AZ; "public" subnets reach the internet directly, "private" ones via NAT. |
+| **NAT gateway** | Lets private-subnet machines make *outbound* internet connections (e.g. pull container images) without being publicly reachable. |
+| **EC2 instance** | A rented virtual machine. The worker nodes are `m5.large` (2 vCPU, 8 GB). |
+| **ELB** | Elastic Load Balancer — AWS managed load balancer fronting a Service. |
+| **vCPU quota** | AWS limit on concurrent vCPUs; the default 5 is why the node group is capped at 2. |
+| **IAM** | Identity and Access Management — AWS's permission system. |
+| **IAM role** | A set of permissions an AWS *service* (not a person) assumes; EKS creates these for the cluster and nodes. |
+| **Terraform** | Declarative infrastructure-as-code tool that builds the AWS resources. |
+| **State file** (`terraform.tfstate`) | Terraform's record of what it built; never commit it (it can hold secrets). |
+| **Provider** | A Terraform plugin for a platform (AWS, Kubernetes, Helm). |
+| **Kubernetes (k8s)** | Container orchestration platform. |
+| **EKS** | Elastic Kubernetes Service — AWS-managed Kubernetes control plane. |
+| **Control plane** | The Kubernetes API server, scheduler and etcd database; AWS-managed here. |
+| **Node / worker node** | A machine that runs pods (an EC2 instance in EKS). |
+| **kubelet** | The agent on each node that talks to the control plane and runs pods. |
+| **Pod** | The smallest deployable unit; one or more containers sharing a network identity. |
+| **Container** | An isolated, packaged process (the thing inside a pod). |
+| **Namespace** | A logical grouping of Kubernetes objects (`kube-system`, `boutique`, `default`). |
+| **DaemonSet** | A controller that runs exactly one pod *per node* (Cilium and Tetragon agents are DaemonSets). |
+| **Deployment** | A controller that maintains N identical replica pods. |
+| **Service** | A stable virtual IP/name load-balancing across a set of pods. |
+| **CoreDNS** | The in-cluster DNS server that resolves Service names. |
+| **CNI** | Container Network Interface — the plugin that gives pods IPs and connectivity. |
+| **AWS VPC CNI (`aws-node`)** | EKS's default CNI; **removed** in this build. |
+| **kube-proxy** | Default component that routes Service traffic via `iptables`; **removed** and replaced by Cilium eBPF. |
+| **Cilium** | eBPF-based CNI providing networking, L3–L7 policy and encryption. |
+| **eBPF** | Technology to run safe, sandboxed programs inside the Linux kernel; Cilium's and Tetragon's foundation. |
+| **ENI** | Elastic Network Interface — an AWS virtual NIC; Cilium's ENI mode draws pod IPs from these. |
+| **Hubble** | Cilium's observability layer — live flow map and searchable flow logs. |
+| **Hubble Relay** | Aggregates Hubble data from every node into one stream. |
+| **Tetragon** | eBPF runtime-security tool that observes (and can block) process/file/network events. |
+| **TracingPolicy** | A Tetragon CRD describing which kernel events to watch/enforce. |
+| **WireGuard** | Modern VPN protocol; Cilium uses it for transparent node-to-node encryption (`cilium_wg0`). |
+| **ClusterMesh** | Cilium feature for connecting multiple clusters into one service mesh. |
+| **Helm** | Kubernetes package manager; installs Cilium and Tetragon as "charts". |
+| **Chart / values** | A Helm package and its configuration inputs (`cilium/values.yaml.tftpl`). |
+| **CRD** | Custom Resource Definition — how Cilium/Tetragon add new object types (e.g. `CiliumNetworkPolicy`) to Kubernetes. |
+| **kubeconfig** | The file (`~/.kube/config`) telling `kubectl` which cluster to talk to and how to authenticate. |
+| **`kubectl`** | The Kubernetes command-line client. |
+
+---
+
+### Where to go next
+
+You now have a verified cluster. Continue your learning with the feature labs in
+[`ISOVALENT_FEATURES.md`](ISOVALENT_FEATURES.md) — start at "Essential" and work down.
+
+- Cilium docs: https://docs.cilium.io
+- Tetragon docs: https://tetragon.io
+- Isovalent labs (free, browser-based): https://isovalent.com/labs

@@ -71,6 +71,27 @@ flowchart TB
     └── tetragon-tracingpolicy.yaml
 ```
 
+## Learning path — start here
+
+New to EKS, Kubernetes, or Cilium? Work through the three documents in order. Together they
+form a self-contained course that takes you from a blank laptop to confidently operating an
+observable, encrypted, policy-secured cluster.
+
+```mermaid
+flowchart LR
+    R["README.md<br/><i>(you are here)</i><br/>orientation + repo map"] --> F["FULL_DEPLOYMENT.md<br/>build & verify<br/>the cluster"]
+    F --> I["ISOVALENT_FEATURES.md<br/>hands-on feature labs<br/>(essential → advanced)"]
+```
+
+| Step | Document | What you'll do | Start at |
+|------|----------|----------------|----------|
+| **1** | **[FULL_DEPLOYMENT.md](FULL_DEPLOYMENT.md)** | Learn the core concepts, then build the cluster keystroke-by-keystroke and verify the Cilium/Hubble/Tetragon stack is healthy. | [Section 0 — Concepts you need first](FULL_DEPLOYMENT.md#0-concepts-you-need-first) |
+| **2** | **[ISOVALENT_FEATURES.md](ISOVALENT_FEATURES.md)** | Exercise every feature — Hubble observability, L3/L4/L7 & DNS policy, WireGuard, Tetragon enforcement, ClusterMesh and more. | [Section 0 — Core concepts](ISOVALENT_FEATURES.md#0-core-concepts-the-mental-model) |
+| **3** | **[FULL_DEPLOYMENT.md › Teardown](FULL_DEPLOYMENT.md#11-teardown)** | Destroy the lab to stop billing (it rebuilds in ~20 min whenever you want it back). | — |
+
+> **In a hurry and already know the stack?** Skip to [Quick start](#quick-start) below.
+> Otherwise, begin with **Step 1** — every later step assumes the vocabulary it teaches.
+
 ## Quick start
 
 ```bash
