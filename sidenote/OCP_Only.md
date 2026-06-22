@@ -16,6 +16,234 @@ fails — the [Troubleshooting](#section-9--troubleshooting) section maps each f
 
 ---
 
+## Section M — Migration Paths (how you get Cilium onto OCP)
+
+Installing **Isovalent Networking for Kubernetes** from OperatorHub only deploys the
+*operator/controller*. It does **not** change the CNI — OVN-Kubernetes is still the datapath
+until you act. On OCP the CNI is owned by the **Cluster Network Operator (CNO)**, which is
+managed by the CVO, so `network.config/cluster → spec.networkType` is effectively an
+install-/migration-time decision. Two supported paths exist; the OCP owner chooses.
+
+| | Option A — Greenfield reinstall | Option B — In-place migration |
+|---|---|---|
+| Best when | Cluster is disposable (no apps) | Cluster cannot be rebuilt |
+| Risk | Low | High (live CNI swap) |
+| Downtime | Full (one rebuild) | Rolling node reboots |
+| Red Hat support | Strongest (certified greenfield) | **Migration itself is unsupported by Red Hat** — Isovalent supports it; engage both account teams first |
+
+> **Warning (from the Isovalent guide):** Isovalent Networking for Kubernetes is a fully
+> certified network plugin for OCP, **but Red Hat provides no support for migrating an active
+> existing cluster**. Contact your Red Hat account team and Isovalent support before
+> proceeding, test in a dev environment first, and expect downtime (nodes reboot, pods
+> restart). Assumes a healthy cluster: all nodes Ready, no ClusterOperators Degraded.
+
+---
+
+### Option A — Greenfield reinstall (Cilium as primary CNI from day 0)
+
+Cleanest, fully supported. Recommended when nothing is running.
+
+```bash
+# A1  Generate install assets (do NOT create the cluster yet)
+$ openshift-install create install-config --dir ocp-cilium
+#     edit install-config.yaml -> networking.networkType: Cilium
+$ openshift-install create manifests --dir ocp-cilium
+
+# A2  Inject the certified Isovalent OLM bundle into manifests/ BEFORE bootstrap:
+#       cluster-network-03-cilium-namespace.yaml
+#       cluster-network-04-cilium-operatorgroup.yaml
+#       cluster-network-05-cilium-subscription.yaml   # pin channel + startingCSV to ONE version
+#       cluster-network-06-ciliumconfig.yaml          # CiliumConfig (see Option B CR for fields)
+#     and confirm in cluster-network-02-config.yml:
+#       spec:
+#         networkType: Cilium
+
+# A3  Build
+$ openshift-install create cluster --dir ocp-cilium
+```
+
+CNO hands the datapath to Cilium at bootstrap. Then run **Sections 2–8** below to verify.
+Use IPAM `cluster-pool`, overlay routing (VXLAN), and `kubeProxyReplacement: true`. The
+`CiliumConfig` fields are the same as Option B below (without the migration-only `devices`
+override).
+
+---
+
+### Option B — In-place OVN-Kubernetes → Cilium migration
+
+Faithful to the Isovalent certified procedure. Overlay model, kube-proxy replacement enabled.
+**Incurs downtime.** Run every step in order.
+
+```bash
+# B0  Pre-flight: confirm healthy starting state
+$ oc get network.config/cluster -o jsonpath='{.spec.networkType}{"\n"}'   # OVNKubernetes
+$ oc get co                                                               # none Degraded
+$ oc get nodes                                                            # all Ready
+```
+
+**B1 — Disable the Cluster Network Operator (CNO)**
+
+```bash
+# Create cno-disable.yaml so the CVO stops managing the network-operator:
+$ cat > cno-disable.yaml <<'EOF'
+- op: add
+  path: /spec/overrides
+  value:
+  - kind: Deployment
+    group: apps
+    name: network-operator
+    namespace: openshift-network-operator
+    unmanaged: true
+EOF
+$ oc patch clusterversion version --type json --patch-file cno-disable.yaml
+
+# Scale the operator to zero and confirm no pods remain:
+$ oc scale deployment -n openshift-network-operator network-operator --replicas=0
+$ oc get pods -n openshift-network-operator
+
+# Remove the initial-deploy state file:
+$ oc delete configmap applied-cluster -n openshift-network-operator
+```
+
+**B2 — Pause the Machine Config Pools (prevent premature reboots)**
+
+```bash
+$ oc patch --type=merge --patch='{"spec":{"paused":true}}' mcp/master
+$ oc patch --type=merge --patch='{"spec":{"paused":true}}' mcp/worker
+```
+
+**B3 — Point the cluster network at Cilium**
+
+> The Cilium CIDR must NOT overlap the existing OVN-Kubernetes network. Example: `10.253.0.0/16`.
+
+```bash
+$ oc patch network.config cluster --type=merge \
+  --patch='{"spec":{"clusterNetwork":[{"cidr":"10.253.0.0/16","hostPrefix":24}],"networkType":"Cilium"},"status":null}'
+
+$ oc patch network.operator cluster --type=merge \
+  --patch='{"spec":{"clusterNetwork":[{"cidr":"10.253.0.0/16","hostPrefix":24}],"defaultNetwork":{"type":"Cilium"},"deployKubeProxy":false},"status":null}'
+```
+
+**B4 — Configure and apply the Isovalent (clife) manifests**
+
+```bash
+$ mkdir clife && tar -xzvf /path/to/clife-v1.x.y.tar.gz -C clife && cd clife
+```
+
+Edit `ciliumconfig.yaml`:
+- set `clusterPoolIPv4PodCIDRList` to your chosen CIDR (`10.253.0.0/16`),
+- set `k8sServiceHost`/`k8sServicePort` to the **internal** API server (`api-int.<cluster>.<base-domain>` : `<port>`),
+- for IPI/openvswitch clusters set `devices: "br-ex,ens5"` (br-ex = OVN bridge, ens5 = the device Cilium uses post-reboot),
+- set `tunnelPort: 4789` (OCP default VXLAN) **or** open 8472 in the cluster firewall.
+
+```yaml
+apiVersion: cilium.io/v1alpha1
+kind: CiliumConfig
+metadata:
+  name: cilium-enterprise
+  namespace: cilium
+spec:
+  securityContext: {privileged: true}
+  ipam:
+    mode: "cluster-pool"
+    operator:
+      clusterPoolIPv4PodCIDRList: ["10.253.0.0/16"]
+      clusterPoolIPv4MaskSize: 24
+  cni:
+    binPath: "/var/lib/cni/bin"
+    confPath: "/var/run/multus/cni/net.d"
+    exclusive: false
+  kubeProxyReplacement: "true"
+  k8sServiceHost: "api-int.openshift1.example.com"
+  k8sServicePort: 8443
+  hubble:
+    enabled: true
+    serviceMonitor: {enabled: true}
+    metrics:
+      enabled:
+      - dns:labelsContext=source_namespace,destination_namespace
+      - drop:labelsContext=source_namespace,destination_namespace
+      - tcp:labelsContext=source_namespace,destination_namespace
+      - icmp:labelsContext=source_namespace,destination_namespace
+      - flow:labelsContext=source_namespace,destination_namespace;sourceContext=workload-name|reserved-identity;destinationContext=workload-name|reserved-identity
+      - "httpV2:exemplars=true;labelsContext=source_ip,source_namespace,source_workload,destination_ip,destination_namespace,destination_workload,traffic_direction;sourceContext=workload-name|reserved-identity;destinationContext=workload-name|reserved-identity"
+      - flow_export
+  prometheus: {enabled: true, serviceMonitor: {enabled: true}}
+  operator:
+    prometheus: {enabled: true}
+    serviceMonitor: {enabled: true}
+  devices: "br-ex,ens5"
+  tunnelPort: 4789
+```
+
+Add the server details to `apps_v1_deployment_clife-controller-manager.yaml` under `env`:
+
+```yaml
+env:
+  - name: WATCH_NAMESPACE
+    valueFrom: {fieldRef: {fieldPath: metadata.namespace}}
+  - name: KUBERNETES_SERVICE_HOST
+    value: "api-int.openshift1.example.com"
+  - name: KUBERNETES_SERVICE_PORT
+    value: "8443"
+```
+
+Apply (retry until the CRDs register), then repoint Multus from OVN to Cilium:
+
+```bash
+$ until oc apply -f /path/to/clife/; do sleep 1; done
+
+$ KUBE_EDITOR="sed -i s;host/run/multus/cni/net.d/10-ovn-kubernetes.conf;host/run/multus/cni/net.d/05-cilium.conflist;" \
+    oc edit cm -n openshift-multus multus-daemon-config
+$ oc rollout restart -n openshift-multus ds/multus
+
+# Wait for Cilium to fully roll out before continuing:
+$ oc get ds -n cilium cilium
+$ oc get pods -n cilium -l k8s-app=cilium
+```
+
+**B5 — Re-enable OpenShift operator management**
+
+```bash
+$ oc delete pod -n openshift-kube-apiserver -l apiserver=true
+$ oc -n openshift-machine-config-operator rollout restart deploy/machine-config-controller
+$ oc -n openshift-machine-config-operator rollout restart deploy/machine-config-operator
+
+$ oc scale deployment -n openshift-network-operator network-operator --replicas=1
+$ oc patch clusterversions version --type=merge --patch '{"spec":{"overrides":null}}'
+```
+
+**B6 — Reboot nodes (unpause the MCPs)**
+
+> This immediately begins cordoning/draining and rebooting nodes. The cluster is degraded
+> until all nodes return. Unpause pools in sequence to reduce impact.
+
+```bash
+$ oc patch --type=merge --patch='{"spec":{"paused":false}}' mcp/master
+$ oc patch --type=merge --patch='{"spec":{"paused":false}}' mcp/worker
+
+# If a node stalls, evictions may be blocked by tolerations/PDBs — inspect:
+$ oc logs -n openshift-machine-config-operator -l k8s-app=machine-config-controller -f
+```
+
+**B7 — Post-migration cleanup**
+
+```bash
+# After all nodes are Ready and ClusterOperators healthy, drop the device override
+# so Cilium auto-detects non-openvswitch devices:
+$ sed -i "s/br-ex,ens5//" /path/to/clife/ciliumconfig.yaml
+$ oc apply -f /path/to/clife
+$ oc -n cilium rollout restart ds/cilium
+$ oc get pods -n cilium -l k8s-app=cilium       # confirm healthy
+
+# Finally, remove the old OVN-Kubernetes namespace:
+$ oc delete namespace openshift-ovn-kubernetes
+```
+
+Then proceed to **Sections 2–8** to validate the datapath, Hubble, Tetragon, and Timescape.
+
+---
+
 ## Section 0 — Prerequisites (one-time, on the engineer's workstation)
 
 ```bash
@@ -264,7 +492,7 @@ echo "== timescape pods =="; oc -n "$TS_NS" get pods
 
 | Symptom | Likely cause | Action |
 |---|---|---|
-| `networkType` is not `Cilium` | Cluster wasn't installed with the Cilium manifests | This is a greenfield decision — must be set at install via the certified operator; can't be flipped on a running OVN cluster non-disruptively |
+| `networkType` is not `Cilium` | Cluster still on OVN-Kubernetes | Either reinstall greenfield (Section M, Option A) or run the in-place OVN→Cilium migration (Section M, Option B). In-place is disruptive and unsupported by Red Hat — engage Isovalent/Red Hat first |
 | `network` ClusterOperator `Degraded` | Cilium operator/agent failing to roll out | `oc -n $CILIUM_NS describe pod <cilium-pod>`; check SCC/SELinux denials in events |
 | cilium pods `CrashLoopBackOff` on OCP | Missing/!applied SecurityContextConstraints | Confirm the certified operator created its SCCs: `oc get scc | grep -i cilium`; reinstall operator if absent |
 | `cilium connectivity test` fails to create namespace | SCC blocks test pods | Grant the test namespace the needed SCC, or run with `--namespace $CILIUM_NS` |
