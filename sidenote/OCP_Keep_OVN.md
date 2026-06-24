@@ -99,8 +99,11 @@ process/security events even when Cilium is **not** in the datapath — giving y
 - If you later add chaining (Option B), Timescape *also* ingests Hubble **network** flows —
   one pane for runtime + network history.
 
-Requires the Isovalent Enterprise license/pull secret (same as the operator install in
-[`OCP_Only.md`](OCP_Only.md)).
+The `quay.io/isovalent` images are public, so **no pull secret is required**; an Enterprise
+licence is only needed to unlock gated/premium features. Installs the same way as the
+operator in [`OCP_Only.md`](OCP_Only.md). For small clusters, Timescape **lite mode** (a
+single pod with embedded ClickHouse) avoids the separate ingester/server/ClickHouse and
+object-storage components.
 
 ---
 

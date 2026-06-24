@@ -417,6 +417,12 @@ $ oc -n <app-ns> exec deploy/<app> -- cat /etc/shadow
 
 ## Section 6 — Verify Hubble Timescape (historical observability, Enterprise)
 
+> The `quay.io/isovalent` images are public — **no pull secret is required**; an Enterprise
+> licence only unlocks gated features. The steps below cover the **full** deployment
+> (separate ingester/server/UI + ClickHouse + object storage). For small clusters, Timescape
+> **lite mode** collapses all of this into a single pod with embedded ClickHouse and no
+> object storage (push target service `hubble-timescape-export:4260`).
+
 ```bash
 # 6.1  Timescape component pods are running (ingester, server, UI backend, ClickHouse)
 $ oc -n $TS_NS get pods
@@ -498,7 +504,7 @@ echo "== timescape pods =="; oc -n "$TS_NS" get pods
 | `cilium connectivity test` fails to create namespace | SCC blocks test pods | Grant the test namespace the needed SCC, or run with `--namespace $CILIUM_NS` |
 | Tetragon pods not present | Tetragon component not enabled in the install/operator | Enable Tetragon in the Isovalent Enterprise config and re-apply |
 | `tetra getevents` shows nothing | No tracing policy loaded, or only base policy | `oc get tracingpolicies`; apply a policy that matches your test action |
-| Timescape pods missing entirely | Enterprise license/pull secret or Timescape values not configured | Verify the pull secret and Timescape Helm/operator values were set during install |
+| Timescape pods missing entirely | Timescape values/operator not configured (images are public — no pull secret needed) | Verify the Timescape Helm/operator values were set during install |
 | Ingester logs: `access denied` / `NoSuchBucket` | Object storage (S3/Blob/GCS/MinIO) creds or bucket wrong/unreachable | Fix the storage secret/endpoint; confirm the bucket exists and network egress is allowed |
 | Timescape UI shows no historical data | Ingest delay, or ingester not writing | Wait the ingest interval (a few minutes); re-check 6.3 ingester logs; verify ClickHouse PVC is Bound |
 | `oc` commands `Forbidden` | Not cluster-admin | Re-login with an admin account / token |
