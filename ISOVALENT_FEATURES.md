@@ -649,7 +649,7 @@ In **lite mode** a single `hubble-timescape-lite` pod performs all of these role
 
 ```mermaid
 flowchart LR
-    Cilium["Cilium agent<br/>hubble.export.timescape"] -->|"gRPC :4260"| Lite["hubble-timescape-lite pod"]
+    Cilium["Cilium agent<br/>hubble.export.timescape"] -->|"gRPC :4261"| Lite["hubble-timescape-lite pod"]
     subgraph Lite pod
       Ing["push ingest"] --> CH[("embedded<br/>ClickHouse")]
       CH --> Srv["Observer API :4244"]
@@ -680,8 +680,10 @@ NAME                      READY   STATUS    RESTARTS   AGE
 hubble-timescape-lite-0   2/2     Running   0          3m
 ```
 
-The two containers are `timescape` and `clickhouse`. The push endpoint Cilium exports to
-is the `hubble-timescape-export` service on port `4260`:
+The two containers are `timescape` and `clickhouse`. The `hubble-timescape-export` service
+exposes two ports: **:4260 is the HTTP push API** and **:4261 is the gRPC streaming API**.
+The Cilium exporter streams over gRPC, so it targets **:4261** (targeting :4260 fails with
+`http2: frame ... looked like an HTTP/1.1 header` and drops every flow):
 
 ```bash
 $ kubectl -n hubble-timescape get svc hubble-timescape-export
@@ -694,11 +696,11 @@ hubble-timescape-export   ClusterIP   172.20.x.x      4260/TCP,4261/TCP
 Check the export target landed in the Cilium config, then watch the lite pod receive flows:
 
 ```bash
-# The push target should reference the export service on port 4260.
+# The push target should reference the export service on the gRPC port 4261.
 $ kubectl -n kube-system get cm cilium-config -o yaml | grep -i timescape
 #   ...expect:
 #   hubble-export-timescape-enabled: "true"
-#   hubble-export-timescape-target: hubble-timescape-export.hubble-timescape.svc.cluster.local:4260
+#   hubble-export-timescape-target: hubble-timescape-export.hubble-timescape.svc.cluster.local:4261
 
 # The lite pod logs the flows it is accepting and writing to ClickHouse.
 $ kubectl -n hubble-timescape logs sts/hubble-timescape-lite -c timescape | grep -iE "flow|insert|push" | tail
@@ -713,6 +715,10 @@ $ for i in $(seq 1 20); do kubectl -n default exec deploy/tiefighter -- \
 ```
 
 ### 19.5 Query historical network + runtime
+
+> **Lite retention:** by default the lite pod keeps only the **last hour** of flows
+> (`flows-ttl: 1h`), so query a *recent* window. Increase it via the chart's
+> `lite`/`config` TTL settings if you need longer history.
 
 The lite pod speaks the Hubble Observer API on port `4244`, so the familiar `hubble` CLI
 can query the **past** against it (not just the live buffer):

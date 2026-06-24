@@ -421,7 +421,7 @@ $ oc -n <app-ns> exec deploy/<app> -- cat /etc/shadow
 > licence only unlocks gated features. The steps below cover the **full** deployment
 > (separate ingester/server/UI + ClickHouse + object storage). For small clusters, Timescape
 > **lite mode** collapses all of this into a single pod with embedded ClickHouse and no
-> object storage (push target service `hubble-timescape-export:4260`).
+> object storage (push target service `hubble-timescape-export:4261`, the gRPC port).
 
 ```bash
 # 6.1  Timescape component pods are running (ingester, server, UI backend, ClickHouse)
