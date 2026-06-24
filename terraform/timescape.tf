@@ -1,17 +1,16 @@
 # ============================================================================
-# Phase 2 (opt-in) — Hubble Timescape
+# Phase 2 (opt-in) — Hubble Timescape (lite)
 #
 # Gives you a single pane that correlates Hubble *network flows* with Tetragon
 # *runtime/process events* over a long retention window (the thing OSS Hubble
-# cannot do). Uses PUSH mode: Cilium streams flows straight to the Timescape
-# ingester's gRPC push API, which writes them to ClickHouse — no object storage
-# or exporter required. Provisions:
-#   - the clickhouse-operator + a chart-managed ClickHouse cluster (the store)
-#   - the hubble-timescape chart (ingester gRPC push API + server + UI)
+# cannot do). Uses LITE + PUSH mode: one all-in-one hubble-timescape pod with an
+# embedded ClickHouse; Cilium streams flows straight to its gRPC push API. No
+# clickhouse-operator, no object storage, no exporter.
 #
-# Everything here is gated on var.enable_timescape (default false), so when it
-# is off this file contributes ZERO changes to the plan.
+# Enterprise images are public on quay.io/isovalent (no pull secret required);
+# the pull-secret wiring stays optional for licensed/air-gapped setups.
 #
+# Gated on var.enable_timescape (default false): off = ZERO plan changes.
 # Values verified against hubble-timescape chart 1.18.8.
 # ============================================================================
 
@@ -45,30 +44,7 @@ resource "kubernetes_secret" "timescape_pull_secret" {
   }
 }
 
-# --- ClickHouse (Timescape's database) --------------------------------------
-resource "helm_release" "clickhouse_operator" {
-  count      = local.ts_count
-  name       = "clickhouse-operator"
-  repository = var.isovalent_helm_repo
-  chart      = "clickhouse-operator"
-  version    = var.clickhouse_operator_version
-  namespace  = kubernetes_namespace.timescape[0].metadata[0].name
-
-  wait    = true
-  timeout = 600
-
-  dynamic "set" {
-    for_each = local.create_pull_secret ? [1] : []
-    content {
-      name  = "imagePullSecrets[0].name"
-      value = var.isovalent_pull_secret_name
-    }
-  }
-
-  depends_on = [helm_release.cilium]
-}
-
-# --- Hubble Timescape (ingester + server) -----------------------------------
+# --- Hubble Timescape (lite: single all-in-one pod + embedded ClickHouse) ---
 resource "helm_release" "hubble_timescape" {
   count      = local.ts_count
   name       = "hubble-timescape"
@@ -81,27 +57,18 @@ resource "helm_release" "hubble_timescape" {
   timeout = 600
 
   values = [yamlencode({
-    # ClickHouse: let the chart deploy its own cluster via clickhouse-operator.
-    # The DSN host auto-resolves to "clickhouse-hubble-timescape" in-cluster.
-    clickhouse = {
-      cluster = {
-        enabled = true
-        image   = { pullSecrets = local.ts_pull_secrets }
-      }
+    # Lite mode: one hubble-timescape pod runs ingest + serve + UI with an
+    # embedded ClickHouse (no clickhouse-operator). Ideal for small clusters.
+    lite = {
+      enabled    = true
+      image      = { pullSecrets = local.ts_pull_secrets }
+      clickhouse = { enabled = true }
     }
 
-    # Per-component Enterprise images (quay.io/isovalent) need the pull secret.
-    certgen  = { image = { pullSecrets = local.ts_pull_secrets } }
-    migrate  = { image = { pullSecrets = local.ts_pull_secrets } }
-    trimmer  = { image = { pullSecrets = local.ts_pull_secrets } }
-    analyzer = { image = { pullSecrets = local.ts_pull_secrets } }
-    server   = { image = { pullSecrets = local.ts_pull_secrets } }
-    ui       = { image = { pullSecrets = local.ts_pull_secrets } }
-
-    # Push mode: no bucket configured, so the ingester runs push-only and
-    # accepts flows streamed from Cilium over its gRPC push API (port 4260).
+    # Push mode: no bucket configured, so the lite pod ingests flows streamed
+    # from Cilium over its gRPC push API, exposed via the
+    # "hubble-timescape-export" service on port 4260.
     ingester = {
-      image = { pullSecrets = local.ts_pull_secrets }
       server = {
         grpc = { enabled = true }
         tls  = { enabled = false }
@@ -110,6 +77,6 @@ resource "helm_release" "hubble_timescape" {
   })]
 
   depends_on = [
-    helm_release.clickhouse_operator,
+    helm_release.cilium,
   ]
 }

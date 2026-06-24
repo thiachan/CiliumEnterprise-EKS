@@ -63,7 +63,7 @@ resource "helm_release" "cilium" {
       eks_api_host     = local.eks_api_host
       eks_api_port     = "443"
       pull_secret_name = local.create_pull_secret ? var.isovalent_pull_secret_name : ""
-      timescape_target = var.enable_timescape ? "hubble-timescape-ingester.${var.timescape_namespace}.svc.cluster.local:4260" : ""
+      timescape_target = var.enable_timescape ? "hubble-timescape-export.${var.timescape_namespace}.svc.cluster.local:4260" : ""
     })
   ]
 

@@ -324,11 +324,13 @@ Optional tuning (re-apply Helm values, not required for the lab):
 
 ## 7. Verify WireGuard encryption
 
-Node-to-node traffic is transparently encrypted.
+Pod-to-pod traffic is transparently encrypted. (The premium *node-to-node* WireGuard
+mode is a licence-gated Enterprise Beta feature and is left disabled in this unlicensed
+lab, so `NodeEncryption` shows `Disabled`.)
 
 ```bash
 $ kubectl -n kube-system exec ds/cilium -c cilium-agent -- cilium-dbg status | grep -A2 Encryption
-Encryption:   Wireguard   [NodeEncryption: Enabled, cilium_wg0 (Pubkey: ..., Peers: 1)]
+Encryption:   Wireguard   [NodeEncryption: Disabled, cilium_wg0 (Pubkey: ..., Peers: 1)]
 
 # See the WireGuard interface and peer on a node
 $ kubectl -n kube-system exec ds/cilium -c cilium-agent -- cilium-dbg encrypt status
@@ -629,9 +631,10 @@ security telemetry in one place.
 > Cilium is streaming flows into it, and query **past** network flows and Tetragon runtime
 > events — the single pane that open-source Hubble cannot give you (live-only, in-memory).
 >
-> **Enterprise only.** Requires the Isovalent licence/pull secret. This repo provisions
-> Timescape in **push mode**: Cilium streams flows straight to the ingester's gRPC API; the
-> ingester writes to ClickHouse. No object storage or exporter is involved.
+> **Enterprise feature.** The `quay.io/isovalent` images are public (no pull secret needed).
+> This repo provisions Timescape in **lite + push mode**: a single StatefulSet with embedded
+> ClickHouse, and Cilium streams flows straight to its gRPC push API. No object storage,
+> exporter, or clickhouse-operator is involved.
 
 ### 19.1 Concept — why Timescape
 
@@ -641,54 +644,64 @@ history, and they are **separate** event streams. **Timescape** ingests **both**
 ClickHouse so you can ask *retrospective* questions — "who talked to `cartservice` last
 Tuesday, and which process opened that connection?" — and see network + runtime correlated.
 
+In **lite mode** a single `hubble-timescape-lite` pod performs all of these roles
+(push ingest, embedded ClickHouse, Observer query API, and UI):
+
 ```mermaid
 flowchart LR
-    Cilium["Cilium agent<br/>hubble.export.timescape"] -->|"gRPC :4260"| Ing["Timescape ingester"]
-    Ing --> CH[("ClickHouse")]
-    CH --> Srv["Timescape server<br/>(Hubble Observer API)"]
-    Srv --> UI["Timescape UI"]
+    Cilium["Cilium agent<br/>hubble.export.timescape"] -->|"gRPC :4260"| Lite["hubble-timescape-lite pod"]
+    subgraph Lite pod
+      Ing["push ingest"] --> CH[("embedded<br/>ClickHouse")]
+      CH --> Srv["Observer API :4244"]
+      Srv --> UI["UI :8000"]
+    end
 ```
 
 ### 19.2 Enable it
 
-From `terraform/`, with the pull secret exported (see
-[FULL_DEPLOYMENT.md](FULL_DEPLOYMENT.md#5-understand-what-terraform-will-build)):
+The `quay.io/isovalent` images are public, so no pull secret is needed. From `terraform/`:
 
 ```bash
-$ export TF_VAR_isovalent_pull_secret_json="$(cat isovalent-pull-secret.json)"
 $ terraform apply -var enable_timescape=true
 ```
 
-This adds the `hubble-timescape` namespace, the `clickhouse-operator`, the `hubble-timescape`
-release, and folds the `hubble.export.timescape` flow export into the in-place Cilium update.
+This adds the `hubble-timescape` namespace and the `hubble-timescape` release in **lite
+mode** — a single StatefulSet with embedded ClickHouse — and folds the
+`hubble.export.timescape` flow export into the in-place Cilium update.
 
 ### 19.3 Verify the stack is up
 
+Lite mode is one pod that ingests, stores (embedded ClickHouse), serves the query API,
+and serves the UI:
+
 ```bash
 $ kubectl -n hubble-timescape get pods
-NAME                                         READY   STATUS    RESTARTS   AGE
-chi-clickhouse-hubble-timescape-...          1/1     Running   0          3m
-clickhouse-operator-...                      1/1     Running   0          4m
-hubble-timescape-ingester-...                1/1     Running   0          3m
-hubble-timescape-server-...                  1/1     Running   0          3m
-hubble-timescape-ui-...                      1/1     Running   0          3m
+NAME                      READY   STATUS    RESTARTS   AGE
+hubble-timescape-lite-0   2/2     Running   0          3m
 ```
 
-All pods `Running`. If the ingester/server are `ImagePullBackOff`, the pull secret was not
-supplied — re-run with `TF_VAR_isovalent_pull_secret_json` set.
+The two containers are `timescape` and `clickhouse`. The push endpoint Cilium exports to
+is the `hubble-timescape-export` service on port `4260`:
+
+```bash
+$ kubectl -n hubble-timescape get svc hubble-timescape-export
+NAME                      TYPE        CLUSTER-IP      PORT(S)
+hubble-timescape-export   ClusterIP   172.20.x.x      4260/TCP,4261/TCP
+```
 
 ### 19.4 Confirm Cilium is pushing flows
 
-Check the export target landed in the Cilium config, then watch the ingester receive flows:
+Check the export target landed in the Cilium config, then watch the lite pod receive flows:
 
 ```bash
-# The push target should reference the ingester service on port 4260.
+# The push target should reference the export service on port 4260.
 $ kubectl -n kube-system get cm cilium-config -o yaml | grep -i timescape
-#   ...expect a hubble export entry pointing at
-#   hubble-timescape-ingester.hubble-timescape.svc.cluster.local:4260
+#   ...expect:
+#   hubble-export-timescape-enabled: "true"
+#   hubble-export-timescape-target: hubble-timescape-export.hubble-timescape.svc.cluster.local:4260
 
-# The ingester logs the flows it is accepting and writing to ClickHouse.
-$ kubectl -n hubble-timescape logs deploy/hubble-timescape-ingester | grep -iE "flow|insert|push" | tail
+# The lite pod logs the flows it is accepting and writing to ClickHouse.
+$ kubectl -n hubble-timescape logs sts/hubble-timescape-lite -c timescape | grep -iE "flow|insert|push" | tail
 ```
 
 Generate some traffic so there is something to ingest (re-uses the lab apps):
@@ -701,12 +714,12 @@ $ for i in $(seq 1 20); do kubectl -n default exec deploy/tiefighter -- \
 
 ### 19.5 Query historical network + runtime
 
-The Timescape **server** speaks the Hubble Observer API, so the familiar `hubble` CLI can
-query the **past** against it (not just the live buffer):
+The lite pod speaks the Hubble Observer API on port `4244`, so the familiar `hubble` CLI
+can query the **past** against it (not just the live buffer):
 
 ```bash
-# Point hubble at the Timescape server instead of Hubble Relay.
-$ kubectl -n hubble-timescape port-forward svc/hubble-timescape-server 4245:4244 >/dev/null 2>&1 &
+# Point hubble at the Timescape lite pod instead of Hubble Relay.
+$ kubectl -n hubble-timescape port-forward sts/hubble-timescape-lite 4245:4244 >/dev/null 2>&1 &
 
 # Ask retrospective questions with --since / --until.
 $ hubble observe --server localhost:4245 \
@@ -774,7 +787,7 @@ $ kubectl apply -f lab/tetragon-tracingpolicy.yaml
 | **FQDN policy** | A policy that allows egress to a DNS name (e.g. `api.github.com`) rather than an IP. |
 | **kube-proxy replacement** | Cilium load-balancing Services in eBPF instead of the deleted `kube-proxy`/`iptables`. |
 | **Maglev / DSR** | Optional LB tunings: consistent-hash backend selection; Direct Server Return preserves client source IP. |
-| **WireGuard** | VPN protocol Cilium uses for transparent node-to-node encryption (`cilium_wg0`). |
+| **WireGuard** | VPN protocol Cilium uses for transparent pod-to-pod encryption (`cilium_wg0`). Node-to-node mode is a licence-gated Enterprise feature. |
 | **Host firewall** | Cilium policy applied to the node's own host network namespace, not just pods. |
 | **Bandwidth manager** | eBPF egress rate-limiting driven by a pod annotation. |
 | **Tetragon** | eBPF runtime-security tool that observes (and can block) process/file/network events. |

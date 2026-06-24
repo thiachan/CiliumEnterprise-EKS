@@ -21,11 +21,15 @@ kubeProxyReplacement: true
 k8sServiceHost: "${eks_api_host}"
 k8sServicePort: "${eks_api_port}"
 
-# --- Node-to-node encryption (WireGuard) ---------------------------------
+# --- Pod-to-pod encryption (WireGuard) -----------------------------------
+# Note: node-to-node WireGuard encryption is a licence-gated Enterprise
+# (Beta) feature (featureGate "EncryptionWireguardNodeToNode"). It is left
+# disabled for this unlicensed lab. Pod-to-pod WireGuard encryption is not
+# gated and works without an Isovalent Enterprise licence.
 encryption:
   enabled: true
   type: wireguard
-  nodeEncryption: true
+  nodeEncryption: false
 
 # --- Observability: Hubble + Hubble UI -----------------------------------
 hubble:

@@ -106,12 +106,6 @@ variable "timescape_version" {
   default     = "1.18.8"
 }
 
-variable "clickhouse_operator_version" {
-  description = "clickhouse-operator Helm chart version (helm.isovalent.com)."
-  type        = string
-  default     = "0.12.2"
-}
-
 variable "tags" {
   description = "Tags applied to all resources."
   type        = map(string)

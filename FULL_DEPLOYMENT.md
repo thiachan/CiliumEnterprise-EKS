@@ -170,8 +170,10 @@ the packets, Tetragon watches the processes that send them.**
 - **kube-proxy replacement** — instead of slow `iptables` chains that grow with every
   Service, Cilium load-balances Services with eBPF hash tables. Faster, and one fewer
   component to run.
-- **WireGuard encryption** — Cilium transparently encrypts *node-to-node* pod traffic over a
-  `cilium_wg0` interface. No app changes; you just turn it on in Helm values.
+- **WireGuard encryption** — Cilium transparently encrypts *pod-to-pod* traffic over a
+  `cilium_wg0` interface. No app changes; you just turn it on in Helm values. (The
+  premium *node-to-node* WireGuard mode is a licence-gated Enterprise Beta feature and
+  is left off in this unlicensed lab.)
 - **ClusterMesh (ready, not paired)** — the plumbing to join a second Cilium cluster so
   Services can fail over across clusters. It's enabled here so you can experiment later.
 
@@ -386,13 +388,13 @@ Before applying, know the moving parts (all under `terraform/`):
 |------|---------|
 | `vpc.tf` | VPC `10.42.0.0/16`, 3 AZs, public + private subnets, single NAT gateway |
 | `eks.tf` | EKS control plane (k8s 1.36), one managed node group (2 × `m5.large`), CoreDNS add-on. **The `vpc-cni` add-on is deliberately NOT installed.** |
-| `cilium.tf` | A bootstrap step that **deletes `aws-node` and `kube-proxy`**, the Isovalent Enterprise pull secret, then a Helm release installing **Enterprise Cilium** (`isovalent/cilium`) |
+| `cilium.tf` | A bootstrap step that **deletes `aws-node` and `kube-proxy`**, an optional Isovalent pull secret, then a Helm release installing **Enterprise Cilium** (`isovalent/cilium`) |
 | `tetragon.tf` | Helm release installing **Enterprise Tetragon** (`isovalent/tetragon`) |
-| `timescape.tf` | **Opt-in** (`enable_timescape=true`): namespace, `clickhouse-operator`, and `hubble-timescape` (push mode) for correlated network + runtime history |
+| `timescape.tf` | **Opt-in** (`enable_timescape=true`): namespace + `hubble-timescape` in **lite mode** (single StatefulSet with embedded ClickHouse, push mode) for correlated network + runtime history |
 | `cilium/values.yaml.tftpl` | Cilium config: ENI mode, kube-proxy replacement, WireGuard, Hubble + UI, ClusterMesh, and (when Timescape is enabled) the Hubble→Timescape flow export |
 
-> **Enterprise images need a pull secret.** All charts pull from `quay.io/isovalent`, so
-> export the Isovalent/Cisco-issued Docker config JSON before applying (never commit it):
+> **Pull secret is optional.** The `quay.io/isovalent` images are public, so no pull secret
+> is required. For a private/air-gapped mirror you can still supply one (never commit it):
 >
 > ```bash
 > export TF_VAR_isovalent_pull_secret_json="$(cat isovalent-pull-secret.json)"
@@ -433,16 +435,16 @@ cilium_version    = "1.18.10"   # Isovalent Enterprise chart (helm.isovalent.com
 tetragon_version  = "1.18.3"    # Isovalent Enterprise chart (helm.isovalent.com)
 ```
 
-> **Enterprise images need a pull secret.** The Enterprise charts pull from
-> `quay.io/isovalent/...`, so supply the Isovalent/Cisco-issued Docker config JSON
-> out-of-band (never commit it):
+> **Pull secret is optional.** The Enterprise charts pull from `quay.io/isovalent/...`,
+> whose images are public — no pull secret needed. For a private/air-gapped mirror you can
+> supply the Docker config JSON out-of-band (never commit it):
 >
 > ```bash
 > export TF_VAR_isovalent_pull_secret_json="$(cat isovalent-pull-secret.json)"
 > ```
 >
-> Terraform then creates the `isovalent-pull-secret` in `kube-system` and wires it into both
-> Helm releases automatically.
+> When supplied, Terraform creates the `isovalent-pull-secret` in `kube-system` and wires it
+> into both Helm releases automatically.
 
 > **Check yourself:** before applying, you should be able to explain, out loud: which file
 > creates the VPC, which file removes `aws-node`/`kube-proxy`, and where Cilium's WireGuard
@@ -581,12 +583,13 @@ Confirm the three headline features are actually on:
 $ kubectl -n kube-system exec ds/cilium -c cilium-agent -- cilium-dbg status \
     | grep -E 'KubeProxyReplacement|Encryption|Cluster health'
 KubeProxyReplacement:   True   [eth0 ... (Direct Routing), eth1 ...]
-Encryption:             Wireguard   [NodeEncryption: Enabled, cilium_wg0 ...]
+Encryption:             Wireguard   [NodeEncryption: Disabled, cilium_wg0 ...]
 Cluster health:         2/2 reachable
 ```
 
 - `KubeProxyReplacement: True` → Cilium replaced kube-proxy.
-- `Encryption: Wireguard … NodeEncryption: Enabled` → node-to-node traffic is encrypted.
+- `Encryption: Wireguard … NodeEncryption: Disabled` → pod-to-pod traffic is encrypted
+  (node-to-node mode is a licence-gated Enterprise feature, off in this lab).
 - `2/2 reachable` → the data path is healthy.
 
 Optional, deeper connectivity test (creates and cleans up test pods):
@@ -1099,7 +1102,7 @@ time through.
 | **Hubble Relay** | Aggregates Hubble data from every node into one stream. |
 | **Tetragon** | eBPF runtime-security tool that observes (and can block) process/file/network events. |
 | **TracingPolicy** | A Tetragon CRD describing which kernel events to watch/enforce. |
-| **WireGuard** | Modern VPN protocol; Cilium uses it for transparent node-to-node encryption (`cilium_wg0`). |
+| **WireGuard** | Modern VPN protocol; Cilium uses it for transparent pod-to-pod encryption (`cilium_wg0`). Node-to-node mode is a licence-gated Enterprise feature. |
 | **ClusterMesh** | Cilium feature for connecting multiple clusters into one service mesh. |
 | **Helm** | Kubernetes package manager; installs Cilium and Tetragon as "charts". |
 | **Chart / values** | A Helm package and its configuration inputs (`cilium/values.yaml.tftpl`). |

@@ -4,9 +4,10 @@ Provision an **Amazon EKS** cluster in **AWS Sydney (`ap-southeast-2`)** and run
 **Isovalent Enterprise stack** — **Cilium** (as a full replacement for the AWS
 VPC CNI) plus **Tetragon** for runtime security — entirely with **Terraform**.
 
-> Requires an Isovalent/Cisco Enterprise licence and image pull secret. This installs the
-> `isovalent/cilium` and `isovalent/tetragon` Enterprise Helm charts from
-> `helm.isovalent.com`.
+> Installs the `isovalent/cilium` and `isovalent/tetragon` Enterprise Helm charts from
+> `helm.isovalent.com`. The `quay.io/isovalent` images are public (no pull secret needed);
+> an Enterprise licence is only required to unlock premium *gated* features (e.g. node-to-node
+> WireGuard, SRv6, BGP).
 
 > **Course map:** **Part 0 · Orientation (this page)** → [Part 1 · Build & Verify](FULL_DEPLOYMENT.md) → [Part 2 · Operate & Explore](ISOVALENT_FEATURES.md)
 >
@@ -23,7 +24,7 @@ VPC CNI) plus **Tetragon** for runtime security — entirely with **Terraform**.
 | Compute | Managed node group, 2 × `m5.large` |
 | CNI | **Cilium in ENI mode**, replacing `aws-node` (AWS VPC CNI) |
 | Service routing | **kube-proxy replacement** (no `kube-proxy`) |
-| Encryption | **WireGuard** node-to-node |
+| Encryption | **WireGuard** pod-to-pod |
 | Observability | **Hubble** + **Hubble UI** |
 | Runtime security | **Tetragon** + a sample `TracingPolicy` |
 | Multi-cluster | **ClusterMesh** API server (ready to pair) |
@@ -127,9 +128,9 @@ flowchart LR
 cd terraform
 terraform init
 
-# Enterprise images pull from quay.io/isovalent — supply the Isovalent/Cisco
-# pull secret out-of-band (never commit it):
-export TF_VAR_isovalent_pull_secret_json="$(cat isovalent-pull-secret.json)"
+# The quay.io/isovalent images are public, so no pull secret is needed.
+# (Optional, for a private/air-gapped mirror only — never commit it:)
+# export TF_VAR_isovalent_pull_secret_json="$(cat isovalent-pull-secret.json)"
 
 terraform apply
 aws eks update-kubeconfig --region ap-southeast-2 --name isovalent-syd
