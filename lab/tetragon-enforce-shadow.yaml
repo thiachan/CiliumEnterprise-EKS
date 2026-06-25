@@ -1,0 +1,38 @@
+# Tetragon ENFORCEMENT demo (runtime security "money shot").
+#
+# Observe-only policies (lab-file-and-network-monitoring) just report events.
+# This one ENFORCES: any process in the `default` namespace that is permitted
+# to read /etc/shadow is immediately SIGKILLed by the kernel, before the read
+# completes. Demo: `kubectl exec tiefighter -- cat /etc/shadow` -> exit code 137.
+#
+# Scope: TracingPolicyNamespaced limits enforcement to the `default` namespace
+# (where tiefighter/xwing live) so it cannot disrupt system or app workloads
+# elsewhere in the cluster. Remove the namespace / use a TracingPolicy for
+# cluster-wide enforcement once you have validated blast radius.
+apiVersion: cilium.io/v1alpha1
+kind: TracingPolicyNamespaced
+metadata:
+  name: "block-sensitive-file-reads"
+  namespace: default
+spec:
+  kprobes:
+    - call: "security_file_permission"
+      syscall: false
+      return: true
+      args:
+        - index: 0
+          type: "file"
+        - index: 1
+          type: "int"
+      returnArg:
+        index: 0
+        type: "int"
+      returnArgAction: "Post"
+      selectors:
+        - matchArgs:
+            - index: 0
+              operator: "Equal"
+              values:
+                - "/etc/shadow"
+          matchActions:
+            - action: Sigkill

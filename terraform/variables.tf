@@ -106,6 +106,17 @@ variable "timescape_version" {
   default     = "1.18.8"
 }
 
+variable "timescape_flows_ttl" {
+  description = <<-EOT
+    Flow retention for Timescape lite (migrate.flows.ttl). Lite stores data on
+    node EPHEMERAL disk (~1 GB/hour at demo traffic, ~20 GB node capacity), so
+    keep this bounded. 6h (~6 GB) is a safe default for a demo day; raise only
+    if you attach a persistent volume to the lite ClickHouse.
+  EOT
+  type        = string
+  default     = "6h"
+}
+
 variable "tags" {
   description = "Tags applied to all resources."
   type        = map(string)

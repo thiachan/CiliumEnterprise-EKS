@@ -65,6 +65,12 @@ resource "helm_release" "hubble_timescape" {
       clickhouse = { enabled = true }
     }
 
+    # Flow retention. Lite keeps flows on node ephemeral disk, so this is bounded
+    # (see var.timescape_flows_ttl). Raise only with a persistent ClickHouse PVC.
+    migrate = {
+      flows = { ttl = var.timescape_flows_ttl }
+    }
+
     # Push mode: no bucket configured, so the lite pod ingests flows streamed
     # from Cilium over its gRPC push API, exposed via the
     # "hubble-timescape-export" service on port 4260.

@@ -1,0 +1,54 @@
+# DNS / FQDN-aware egress demo (Enterprise differentiator for egress control).
+#
+# Cilium's DNS proxy lets you write egress policy against DNS NAMES, not IPs.
+# Here the `mediabot` pod may ONLY reach api.github.com (plus DNS); any other
+# destination is denied even though no IP is hardcoded.
+#
+# Demo:
+#   kubectl exec mediabot -- curl -sI https://api.github.com        # 200 (allowed)
+#   kubectl exec mediabot -- curl -sI --max-time 5 https://www.cisco.com  # times out (denied)
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: mediabot
+  namespace: default
+  labels:
+    org: empire
+    class: mediabot
+spec:
+  containers:
+    - name: mediabot
+      image: quay.io/cilium/json-mock:v1.3.8
+      imagePullPolicy: IfNotPresent
+---
+apiVersion: "cilium.io/v2"
+kind: CiliumNetworkPolicy
+metadata:
+  name: "fqdn-egress-mediabot"
+  namespace: default
+spec:
+  description: "Allow mediabot egress to DNS and only api.github.com (FQDN-based)"
+  endpointSelector:
+    matchLabels:
+      class: mediabot
+  egress:
+    # Allow DNS lookups via kube-dns so Cilium's DNS proxy can learn FQDN IPs.
+    - toEndpoints:
+        - matchLabels:
+            io.kubernetes.pod.namespace: kube-system
+            k8s-app: kube-dns
+      toPorts:
+        - ports:
+            - port: "53"
+              protocol: ANY
+          rules:
+            dns:
+              - matchPattern: "*"
+    # Allow egress only to api.github.com (resolved + pinned by the DNS proxy).
+    - toFQDNs:
+        - matchName: "api.github.com"
+      toPorts:
+        - ports:
+            - port: "443"
+              protocol: TCP
